@@ -1,0 +1,44 @@
+{
+  "events": {
+    "0x0001": {
+      "token": "EVT_CAN_RX",
+      "module": "CAN",
+      "event": "RX"
+    },
+    "0x0002": {
+      "token": "EVT_TEMP_CTRL",
+      "module": "TEMP",
+      "event": "CTRL"
+    }
+  },
+  "keys": {
+    "0x001": {
+      "name": "channel",
+      "display_override": ""
+    },
+    "0x002": {
+      "name": "data",
+      "display_override": ""
+    },
+    "0x003": {
+      "name": "exec_cyc",
+      "display_override": ""
+    },
+    "0x004": {
+      "name": "limit",
+      "display_override": ""
+    },
+    "0x005": {
+      "name": "msg",
+      "display_override": ""
+    },
+    "0x006": {
+      "name": "std_id",
+      "display_override": ""
+    },
+    "0x007": {
+      "name": "temp",
+      "display_override": ""
+    }
+  }
+}
