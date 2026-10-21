@@ -1,0 +1,16 @@
+# Build artifacts
+build/
+bin/
+*.o
+*.elf
+*.bin
+rtt_example
+rtt_output.bin
+
+# Python cache
+__pycache__/
+*.py[cod]
+
+# IDE / Editor
+.vscode/
+.idea/
