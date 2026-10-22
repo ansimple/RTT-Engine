@@ -24,26 +24,37 @@
 ## 2. 시스템 아키텍처 (Architecture)
 
 ```
-[Pre-build 단계]
+[1. Pre-build 단계]
   C 소스 코드 (*.c, *.h)
          │
          ▼ tools/gen_rtt_framework.py
          ├──► include/generated_rtt_keys.h (컴파일 타임 Key ID 매크로)
-         └──► build/mapping.json           (호스트 UI 디코딩용 사전)
+         └──► build/mapping.json           (초기 호스트 UI 디코딩용 사전)
 
-[타깃 런타임 (MCU)]
+[2. 컴파일 및 Post-compile 단계]
+  컴파일러 (GCC / Clang)
+         │
+         ▼ firmware.elf (타깃 바이너리)
+         │
+         ▼ tools/post_compile_strings.py (.rodata / 심볼 주소 분석)
+         └──► build/mapping.json 업데이트 완료
+              (Flash 상주 상수 문자열 주소-문자열 맵이 mapping.json에 영구 기록됨)
+
+[3. 타깃 런타임 (MCU)]
   EVENT_LOG / EVENT_LOG_BUFS 호출
          │ (C11 _Generic 타입 식별 + DWT 타임스탬프 + 직렬화)
+         │ * 상수 문자열은 4바이트 Flash 주소만 초고속(Zero Copy) 전송
          ▼
   SEGGER RTT 버퍼 (Channel 1, Non-Cacheable MPU 영역)
          │
          ▼ SWD Background Direct Memory Access (J-Link)
 
-[호스트 수신 레이어]
+[4. 호스트 수신 레이어]
   tools/host_rtt_adapter.py (0xA5 Sync + mapping.json 역직렬화)
-         │
+         │ * 호스트는 바이너리(.elf) 없이 mapping.json 하나만으로 상수 문자열 복원!
          ▼ Text Synthesizer
   "[CAN:RX] channel=1 std_id=0x07E8 data=\"11223344\" exec_cyc=184"
+  "[SYS:STATE] state=\"STANDBY\" desc=\"SYSTEM_READY\""
          │
          ▼ 기존 UI 자동화 테스트 엔진 (DWT 판정, 범위 검증 등)
 ```
@@ -64,12 +75,13 @@
 │   └── SEGGER_RTT.c                      # SEGGER RTT 참조 구현 / 모의 구현
 ├── tools/
 │   ├── gen_rtt_framework.py              # Pre-build C 소스 스캐너
+│   ├── post_compile_strings.py           # Post-compile 바이너리 상수 문자열 추출기
 │   └── host_rtt_adapter.py               # 호스트 바이너리 패킷 파서 및 어댑터
 ├── examples/
 │   └── main_example.c                    # 타깃 사용 예시 코드
 ├── tests/
 │   └── test_rtt_framework.py             # 파이프라인 검증 및 단위 테스트
-├── CMakeLists.txt                        # CMake 빌드 구성
+├── CMakeLists.txt                        # CMake 빌드 구성 (Pre/Post 파이프라인 통합)
 └── README.md
 ```
 
@@ -91,9 +103,20 @@
 
 ## 5. 빠른 시작 (Quick Start)
 
-### 5.1 Pre-build 키 및 매핑 JSON 생성
+### 5.1 Pre-build 및 Post-compile 파이프라인 수동 실행
 ```bash
+# 1. Pre-build: 소스 스캔 및 헤더/기본 매핑 생성
 python3 tools/gen_rtt_framework.py ./examples ./include/generated_rtt_keys.h ./mapping.json
+
+# 2. 컴파일 (예: CMake 또는 GCC)
+gcc -std=c11 -O2 -no-pie -Iinclude src/SEGGER_RTT.c examples/main_example.c -o rtt_example
+
+# 3. Post-compile: 최종 ELF 바이너리에서 상수 문자열 주소를 추출하여 mapping.json 업데이트
+python3 tools/post_compile_strings.py rtt_example ./mapping.json
+
+# 4. 호스트 디코더 실행: mapping.json 단독 파일만으로 디코딩 운용
+./rtt_example
+python3 tools/host_rtt_adapter.py -m mapping.json -i rtt_output.bin
 ```
 
 ### 5.2 타깃 펌웨어 코드 작성 예시
@@ -101,6 +124,7 @@ python3 tools/gen_rtt_framework.py ./examples ./include/generated_rtt_keys.h ./m
 #include "rtt_logger.h"
 
 #define EVT_CAN_RX    0x0001
+#define EVT_SYS_STATE 0x0002
 
 void OnCanReceived(uint8_t *payload, uint16_t len) {
     uint32_t start_cyc = GET_DWT_CYCCNT();
@@ -117,9 +141,17 @@ void OnCanReceived(uint8_t *payload, uint16_t len) {
         KV_CYC(exec_cyc, elapsed_cyc)
     );
 }
+
+void OnStateChanged(void) {
+    // 상수 문자열은 4바이트 Flash 주소만 초고속(Zero Copy) 전송
+    EVENT_LOG(EVT_SYS_STATE,
+        KV(state, "STANDBY"),
+        KV_FLASH_STR(desc, "SYSTEM_READY")
+    );
+}
 ```
 
-### 5.3 호스트 디코더 실행 및 검증
+### 5.3 테스트 스위트 실행
 ```bash
 python3 -m unittest discover tests
 ```

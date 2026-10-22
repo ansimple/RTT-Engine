@@ -7,6 +7,7 @@ set(CMAKE_C_STANDARD_REQUIRED ON)
 find_package(Python3 COMPONENTS Interpreter REQUIRED)
 
 set(GEN_SCRIPT ${CMAKE_CURRENT_SOURCE_DIR}/tools/gen_rtt_framework.py)
+set(POST_SCRIPT ${CMAKE_CURRENT_SOURCE_DIR}/tools/post_compile_strings.py)
 set(GEN_HEADER ${CMAKE_CURRENT_SOURCE_DIR}/include/generated_rtt_keys.h)
 set(GEN_JSON   ${CMAKE_CURRENT_BINARY_DIR}/mapping.json)
 
@@ -33,6 +34,16 @@ set(SOURCES
 add_executable(rtt_example ${SOURCES})
 add_dependencies(rtt_example GenerateRttArtifacts)
 
+# Post-compile: Extract constant string addresses from compiled ELF binary into mapping.json
+add_custom_command(TARGET rtt_example POST_BUILD
+    COMMAND ${Python3_EXECUTABLE} ${POST_SCRIPT}
+            $<TARGET_FILE:rtt_example>
+            ${GEN_JSON}
+    COMMENT "Post-compile: Resolving constant strings from ELF into mapping.json..."
+)
+
 if(CMAKE_C_COMPILER_ID MATCHES "GNU|Clang")
-    target_compile_options(rtt_example PRIVATE -Wall -Wextra -O2)
+    # For simulation/native targets, use -no-pie to preserve fixed VMA addresses for string pointers
+    target_compile_options(rtt_example PRIVATE -Wall -Wextra -O2 -no-pie)
+    target_link_options(rtt_example PRIVATE -no-pie)
 endif()

@@ -3,9 +3,21 @@
 #include <string.h>
 #include "rtt_logger.h"
 
-/* Module Event IDs (Can be auto-scanned or pre-defined) */
-#define EVT_CAN_RX    0x0001
-#define EVT_TEMP_CTRL 0x0002
+/* Module Event IDs */
+// Pre-defined or will be assigned by pre-build scanner
+
+static const char g_str_ready[] = "SYSTEM_READY";
+
+void Process_System_State(void) {
+    /* Example 3: Constant Flash/ROM String Logging (Zero-Copy 4-byte address)
+     * Target transmits 32-bit Flash pointer address;
+     * Host resolves to "STANDBY" and "SYSTEM_READY" solely via mapping.json without needing the binary!
+     */
+    EVENT_LOG(EVT_SYS_STATE,
+        KV(state, "STANDBY"),
+        KV_FLASH_STR(desc, g_str_ready)
+    );
+}
 
 void Process_CAN_Message(void) {
     uint8_t payload[8] = { 0x11, 0x22, 0x33, 0x44, 0xAA, 0xBB, 0xCC, 0xDD };
@@ -46,6 +58,7 @@ int main(void) {
 
     Process_CAN_Message();
     Process_Temperature_Loop(87.420f);
+    Process_System_State();
 
     size_t captured_len = 0;
     const uint8_t *captured_data = SEGGER_RTT_GetChannelBuffer(1, &captured_len);

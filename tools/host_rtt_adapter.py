@@ -26,6 +26,7 @@ class RttFrameDecoder:
             self.mapping = json.load(f)
         self.events_map: Dict[str, Dict[str, Any]] = self.mapping.get("events", {})
         self.keys_map: Dict[str, Dict[str, Any]] = self.mapping.get("keys", {})
+        self.strings_map: Dict[str, str] = self.mapping.get("strings", {})
         self.elf_path = elf_path
         self._stream_buffer = bytearray()
 
@@ -98,8 +99,13 @@ class RttFrameDecoder:
                 val_str = f"0x{(raw_val & 0xFFFF):04X}"
             elif type_code == 0x5:  # TYPE_HEX32
                 val_str = f"0x{raw_val:08X}"
-            elif type_code == 0x6:  # TYPE_FLASH_STR
-                val_str = f"0x{raw_val:08X}"
+            elif type_code == 0x6:  # TYPE_FLASH_STR (Constant string resolved via mapping.json)
+                addr_key = f"0x{raw_val:08X}"
+                if addr_key in self.strings_map:
+                    val_str = f'"{self.strings_map[addr_key]}"'
+                else:
+                    # Fallback to hex address if string not mapped in mapping.json
+                    val_str = addr_key
             elif type_code == 0x7:  # TYPE_HEX_ARR
                 arr_bytes = buffer[trailing_offset: trailing_offset + var_len]
                 trailing_offset += var_len

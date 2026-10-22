@@ -80,7 +80,7 @@
 
 ```
 ┌────────────────────────────────────────────────────────────────────────┐
-│ [1. Pre-build / 빌드 파이프라인]                                      │
+│ [1. Pre-build / 소스 분석 단계]                                        │
 │                                                                        │
 │   펌웨어 C 소스 코드 (*.c, *.h)                                        │
 │          │                                                             │
@@ -88,28 +88,48 @@
 │          ├───────────────────────────────┐                             │
 │          ▼                               ▼                             │
 │   generated_rtt_keys.h            mapping.json                         │
-│   (컴파일용 Key ID 정의)          (호스트 UI 디코딩용 DB)              │
+│   (컴파일용 Key ID 정의)          (초기 호스트 UI 디코딩용 DB:         │
+│                                    이벤트/키 메타데이터 및             │
+│                                    추출 대상 심볼 목록 등록)           │
 │          │                               │                             │
 │          ▼ GCC (C11, -std=c11)           │                             │
 │   firmware.elf / firmware.bin            │                             │
 └──────────┬───────────────────────────────┼─────────────────────────────┘
-           │ Flashing                      │ Loading
+           │                               │
            ▼                               ▼
+┌────────────────────────────────────────────────────────────────────────┐
+│ [2. Post-compile / 바이너리 상수 추출 단계]                            │
+│                                                                        │
+│   firmware.elf (또는 firmware.bin / 심볼맵)                            │
+│          │                                                             │
+│          ▼ 포스트 컴파일러 (post_compile_strings.py)                   │
+│          │ - ELF의 .rodata / 심볼 테이블 파싱                          │
+│          │ - 정적 상수 문자열의 절대 메모리 주소 매핑                  │
+│          ▼                                                             │
+│   mapping.json 업데이트 완료                                           │
+│   (events, keys, strings: { "0x08001234": "OK", ... } 가 영구 기록됨)  │
+└──────────┬───────────────────────────────┬─────────────────────────────┘
+           │ Flashing                      │ Loading
+           ▼                               ▼ (mapping.json 단독 배포/운영)
 ┌───────────────────────────┐     ┌──────────────────────────────────────┐
-│ [2. 타깃 런타임 (MCU)]    │     │ [3. 호스트 UI 테스트 프레임워크]     │
+│ [3. 타깃 런타임 (MCU)]    │     │ [4. 호스트 UI 테스트 프레임워크]     │
 │                           │     │                                      │
 │ EVENT_LOG(...) 호출       │     │ J-Link RTT Stream 수신               │
 │   ├─ C11 _Generic 타입식별│     │   │                                  │
-│   ├─ DWT 사이클 타임스탬프│     │   ▼ Binary Packet Parser             │
-│   └─ 고정 슬롯 + 가변 꼬리│     │   ├─ 0xA5 Sync 바이트 동기화         │
-│          │                │     │   ├─ Event ID / Key ID 매핑 (JSON)   │
-│          ▼ Direct Write   │     │   ├─ Type 필드별 포맷 역직렬화       │
-│ SEGGER RTT Ring Buffer    │     │   └─ 가변 헥사/문자열 오프셋 슬라이싱│
-│ (Channel 1, Non-Cacheable)│     │          │                           │
-└──────────┬────────────────┘     │          ▼ Text Synthesizer          │
-           │                      │ "[MODULE:EVENT] key=val key=\"...\"" │
+│   │  (Flash 문자열 주소)  │     │   ▼ Binary Packet Parser             │
+│   ├─ DWT 사이클 타임스탬프│     │   ├─ 0xA5 Sync 바이트 동기화         │
+│   └─ 고정 슬롯 + 가변 꼬리│     │   ├─ Event ID / Key ID 매핑 (JSON)   │
+│          │                │     │   ├─ Type 필드별 포맷 역직렬화       │
+│          ▼ Direct Write   │     │   ├─ TYPE_FLASH_STR 수신 시:         │
+│ SEGGER RTT Ring Buffer    │     │   │  mapping.json의 strings 딕셔너리 │
+│ (Channel 1, Non-Cacheable)│     │   │  직접 조회 -> 즉각 문자열 복원!  │
+└──────────┬────────────────┘     │   │  (호스트는 바이너리 파일 불필요) │
+           │                      │   └─ 가변 헥사/문자열 오프셋 슬라이싱│
            │ SWD Background Access│          │                           │
-           └─────────────────────►│          ▼ 기존 UI 테스트 엔진       │
+           └─────────────────────►│          ▼ Text Synthesizer          │
+                                  │ "[MODULE:EVENT] key=val key=\"...\"" │
+                                  │          │                           │
+                                  │          ▼ 기존 UI 테스트 엔진       │
                                   │ (태그 간 시간차, DWT 사이클 판정,   │
                                   │  Key 값 범위 검증 등)                │
                                   └──────────────────────────────────────┘
@@ -118,13 +138,19 @@
 ### 2.2 계층별 역할 및 상호작용
 1. **Pre-build 스캐너 레이어 (`gen_rtt_framework.py`)**:
    - 빌드 직전 소스 트리를 스캔하여 `EVENT_LOG*` 및 `KV*` 매크로 호출을 탐색합니다.
-   - Key 이름 및 이벤트 식별자를 고유 번호로 인덱싱하여 C 헤더(`generated_rtt_keys.h`)와 호스트 메타데이터(`mapping.json`)를 동기 생성합니다.
-2. **타깃 런타임 레이어 (`rtt_logger.h`)**:
+   - Key 이름, 이벤트 식별자, 그리고 소스 상에 명시된 정적 상수 문자열 심볼/리터럴 후보를 수집합니다.
+   - C 헤더(`generated_rtt_keys.h`)와 초기 호스트 메타데이터(`mapping.json`)를 생성합니다.
+2. **Post-compile 바이너리 처리 레이어 (`post_compile_strings.py`)**:
+   - 컴파일 완료 후 생성된 최종 바이너리(`firmware.elf`)를 읽어 `.rodata` 섹션 및 심볼 테이블을 파싱합니다.
+   - 각 정적 상수 문자열의 타깃 메모리 주소(Flash/ROM 절대 주소)를 계산하고, `mapping.json`의 `"strings"` 항목에 주소(예: `"0x08001234"`)와 실제 문자열 값을 결합하여 갱신합니다.
+   - 이로써 최종 결과물인 `mapping.json` 파일 하나만 있으면 호스트 환경에서 ELF/바이너리 파일 없이도 모든 상수 문자열을 완벽히 복원할 수 있습니다.
+3. **타깃 런타임 레이어 (`rtt_logger.h`)**:
    - C11 `_Generic`을 통해 인자 타입을 컴파일 타임에 분기하고 6바이트 정형 슬롯을 스택에 구성합니다.
+   - `const char*` 상수 문자열의 경우 문자열 전체를 전송하는 대신 4바이트 Flash 주소만 슬롯에 담아 전송(Zero Copy, $0.2 \sim 0.5\,\mu\text{s}$)합니다.
    - 0xA5 매직 바이트, DWT 클록 카운터 타임스탬프, 슬롯 데이터 및 가변 페이로드를 SEGGER RTT 버퍼(채널 1)로 연속 전송합니다.
-3. **호스트 디코더 레이어 (`host_rtt_adapter.py`)**:
+4. **호스트 디코더 레이어 (`host_rtt_adapter.py`)**:
    - J-Link RTT 통신 채널로부터 원시 바이트 스트림을 수신하고 0xA5 동기화 바이트를 기준으로 프레임을 정렬합니다.
-   - `mapping.json`을 참조하여 Event ID 및 Key ID를 실제 문자열 심볼로 복원하고 기존 UI 엔진이 인식하는 ASCII 텍스트로 합성합니다.
+   - `mapping.json`을 단독 참조하여 Event ID, Key ID뿐만 아니라 `TYPE_FLASH_STR`의 Flash 주소를 문자열로 즉각 매핑하여 기존 UI 엔진이 인식하는 ASCII 텍스트로 합성합니다. 호스트 운영 환경에 무거운 바이너리 파일이나 디버그 정보(.elf)를 배포할 필요가 전혀 없습니다.
 
 ---
 
@@ -450,16 +476,17 @@ void MPU_Config_RTT_Region(void) {
 
 ---
 
-## 5. 프리 컴파일(Pre-build) 자동화 파이프라인
+## 5. 프리 컴파일 및 포스트 컴파일 자동화 파이프라인
 
-컴파일러 실행 전 소스 트리를 스캔하여 `generated_rtt_keys.h`와 호스트용 `mapping.json`을 단일 실행으로 자동 생성합니다.
+컴파일러 실행 전 소스 트리를 스캔하여 `generated_rtt_keys.h`와 초기 `mapping.json`을 자동 생성하며, 컴파일 완료 후 포스트 컴파일 스크립트가 ELF 바이너리에서 상수 문자열의 절대 메모리 주소를 추출하여 `mapping.json`에 영구 기록합니다.
 
-### 5.1 소스 스캐너 (`gen_rtt_framework.py`) 구조
+### 5.1 프리 컴파일 소스 스캐너 (`gen_rtt_framework.py`)
 스캐너는 프로젝트 내 모든 C/C++ 소스(`*.c`, `*.h`, `*.cpp`)를 파싱하여:
 1. 주석(`/* ... */`, `// ...`)을 안전하게 제거
 2. `EVENT_LOG(EVT_..., ...)` 호출부에서 이벤트 토큰 추출
 3. `KV(key, ...)` 및 `KV_*(key, ...)` 호출부에서 키 토큰 추출
-4. 기존에 할당된 ID의 안정성을 보존하면서 결정론적(Deterministic) 정렬 기반 신규 ID를 증분 할당
+4. 리터럴 문자열(예: `KV(state, "IDLE")`, `KV_FLASH_STR(mode, "RUN")`) 및 명시적 정적 심볼명을 감지하여 `pending_strings` 후보로 등록
+5. 기존에 할당된 ID의 안정성을 보존하면서 결정론적(Deterministic) 정렬 기반 신규 ID를 증분 할당
 
 ### 5.2 키 식별자 헤더 (`generated_rtt_keys.h`) 생성 규칙
 Key ID는 12비트 범위(`0x001` ~ `0xFFF`) 내에서 할당되며, C 매크로 정의 형식으로 출력됩니다.
@@ -476,12 +503,22 @@ Key ID는 12비트 범위(`0x001` ~ `0xFFF`) 내에서 할당되며, C 매크로
 #define KEY_ID_temp                     0x005
 #define KEY_ID_limit                    0x006
 #define KEY_ID_msg                      0x007
+#define KEY_ID_state                    0x008
 
 #endif /* GENERATED_RTT_KEYS_H_ */
 ```
 
-### 5.3 디코딩 메타데이터 (`mapping.json`) 스키마
-호스트 어댑터가 참조하는 JSON 스키마는 이벤트 및 키의 매핑 사전을 담고 있습니다.
+### 5.3 포스트 컴파일 바이너리 상수 추출기 (`post_compile_strings.py`)
+컴파일 완료 후 생성된 타깃 바이너리(`firmware.elf`)를 분석하여 정적 상수 문자열의 주소를 `mapping.json`에 주입합니다:
+1. **ELF 파싱**: ELF 헤더 및 섹션 헤더를 읽어 `.rodata`, `.text`, `.data` 등 읽기 전용/정적 메모리 영역의 가상 주소(`VMA`)와 파일 오프셋 매핑을 파싱합니다.
+2. **문자열 주소 매핑**:
+   - 심볼 테이블(`.symtab`) 및 소스 스캔 단계에서 추출된 리터럴 문자열을 `.rodata` 섹션 메모리 바이트에서 검색하여 정확한 가상 메모리 주소(예: `0x08001234` 또는 `0x00002008`)를 도출합니다.
+   - 또한 `.rodata` 섹션 내의 모든 Null-terminated UTF-8/ASCII 문자열을 자동으로 인덱싱하여 주소-문자열 맵을 구축합니다.
+3. **`mapping.json` 업데이트**: 프리 컴파일에서 생성된 `mapping.json`의 `"strings"` 항목에 `{ "0x08001234": "IDLE", "0x08001239": "RUN", ... }`를 채워 넣습니다.
+4. **결과**: 호스트 디코더는 타깃 펌웨어 바이너리 파일(`.elf`)을 소지할 필요 없이, 오직 완성된 `mapping.json` 파일 하나만으로 런타임에 전송된 32비트 Flash 주소를 완벽히 문자열로 복원합니다.
+
+### 5.4 디코딩 메타데이터 (`mapping.json`) 스키마
+호스트 어댑터가 참조하는 최종 JSON 스키마:
 
 ```json
 {
@@ -498,36 +535,50 @@ Key ID는 12비트 범위(`0x001` ~ `0xFFF`) 내에서 할당되며, C 매크로
     }
   },
   "keys": {
-    "0x001": { "name": "channel" },
-    "0x002": { "name": "std_id" },
-    "0x003": { "name": "data" },
-    "0x004": { "name": "exec_cyc" },
-    "0x005": { "name": "temp" },
-    "0x006": { "name": "limit" },
-    "0x007": { "name": "msg" }
+    "0x001": { "name": "channel", "display_override": "" },
+    "0x002": { "name": "std_id", "display_override": "" },
+    "0x003": { "name": "data", "display_override": "" },
+    "0x004": { "name": "exec_cyc", "display_override": "" },
+    "0x005": { "name": "temp", "display_override": "" },
+    "0x006": { "name": "limit", "display_override": "" },
+    "0x007": { "name": "msg", "display_override": "" },
+    "0x008": { "name": "state", "display_override": "" }
+  },
+  "strings": {
+    "0x00002008": "INITIALIZING",
+    "0x00002018": "STANDBY",
+    "0x00002028": "SYSTEM_READY"
   }
 }
 ```
 
-### 5.4 CMake 및 Makefile 빌드 시스템 통합
-빌드 시스템에서 컴파일 타깃 이전에 실행되도록 종속성을 구성합니다.
+### 5.5 빌드 시스템 통합 (CMake 예시)
+빌드 시스템에서 컴파일 타깃 전후 단계로 파이프라인을 구성합니다:
 
 ```cmake
-# CMakeLists.txt 구성 예시
 find_package(Python3 REQUIRED)
 
-add_custom_target(GenerateRttArtifacts ALL
-    COMMAND Python3::Interpreter ${CMAKE_SOURCE_DIR}/tools/gen_rtt_framework.py
-                                 ${CMAKE_SOURCE_DIR}/src
-                                 ${CMAKE_SOURCE_DIR}/include/generated_rtt_keys.h
-                                 ${CMAKE_BINARY_DIR}/mapping.json
-    COMMENT "Scanning firmware sources for RTT logging keys and mapping JSON..."
+# 1. Pre-build: 소스 스캔 및 키/초기 매핑 JSON 생성
+add_custom_target(GenerateRttArtifacts
+    COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tools/gen_rtt_framework.py
+            ${CMAKE_SOURCE_DIR}/src
+            ${CMAKE_SOURCE_DIR}/include/generated_rtt_keys.h
+            ${CMAKE_BINARY_DIR}/mapping.json
+            --extra-src ${CMAKE_SOURCE_DIR}/examples
+    COMMENT "Pre-build: Scanning sources for RTT keys and mapping JSON..."
 )
 
+# 2. Compile: ELF 펌웨어 빌드
 add_executable(${PROJECT_NAME}.elf ${SOURCES})
 add_dependencies(${PROJECT_NAME}.elf GenerateRttArtifacts)
-target_include_directories(${PROJECT_NAME}.elf PRIVATE ${CMAKE_SOURCE_DIR}/include)
-target_compile_options(${PROJECT_NAME}.elf PRIVATE -std=c11)
+
+# 3. Post-compile: 최종 ELF 바이너리에서 상수 문자열 주소를 추출하여 mapping.json 업데이트
+add_custom_command(TARGET ${PROJECT_NAME}.elf POST_BUILD
+    COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tools/post_compile_strings.py
+            $<TARGET_FILE:${PROJECT_NAME}.elf>
+            ${CMAKE_BINARY_DIR}/mapping.json
+    COMMENT "Post-compile: Resolving constant string addresses into mapping.json..."
+)
 ```
 
 ---
@@ -540,8 +591,13 @@ target_compile_options(${PROJECT_NAME}.elf PRIVATE -std=c11)
 1. **Sync Byte 정렬**: 수신 버퍼에서 `0xA5` 매직 바이트를 선형 탐색합니다. 앞선 오염 바이트는 즉시 폐기(Drop)합니다.
 2. **헤더 검증**: 최소 8바이트 확보 후 `Sync(1B)`, `Event ID(2B)`, `HW Timestamp(4B)`, `Item Count(1B)`를 리틀 엔디언으로 언패킹합니다.
 3. **슬롯 스캔 및 가변 길이 합산**: $N$개 슬롯($N \times 6\text{B}$)을 읽으며 `TYPE_HEX_ARR` 및 `TYPE_DYN_STR`에 명시된 가변 바이트 길이($L_i$)의 총합($M$)을 계산합니다.
-4. **전체 패킷 도달 검사**: 현재 수신 버퍼 길이가 $8 + 6N + M$ 바이트 이상인지 검사하고, 부족할 경우 추가 스트림 도달 시점까지 대기를 유지합니다.
-5. **텍스트 합성**: `mapping.json` 사전을 매핑하여 `[모듈:이벤트] key1=val1 key2=val2 ...` 포맷으로 복원합니다.
+4. **상수 문자열(Flash String) 역참조**:
+   - `TYPE_FLASH_STR` 타입 슬롯인 경우 슬롯의 `str_addr`(32비트 절대 메모리 주소)를 `0x%08X` 형태의 16진수 키로 변환합니다.
+   - `mapping.json`의 `"strings"` 테이블에서 해당 주소를 검색하여 문자열(예: `"STANDBY"`)을 즉시 조회합니다.
+   - 매핑 테이블에 존재할 경우 `key="STANDBY"` 형태로 복원하며, 테이블에 미등록된 주소일 경우 폴백으로 `0x08001234` 주소값을 그대로 표출합니다.
+   - **호스트 환경은 바이너리 파일(.elf)을 전혀 읽을 필요가 없으며, 오직 `mapping.json` 하나만으로 완벽한 운영이 가능합니다.**
+5. **전체 패킷 도달 검사**: 현재 수신 버퍼 길이가 $8 + 6N + M$ 바이트 이상인지 검사하고, 부족할 경우 추가 스트림 도달 시점까지 대기를 유지합니다.
+6. **텍스트 합성**: `mapping.json` 사전을 매핑하여 `[모듈:이벤트] key1=val1 key2=val2 ...` 포맷으로 복원합니다.
 
 ### 6.2 호스트 어댑터 (`host_rtt_adapter.py`) 핵심 로직
 (자세한 소스 코드는 프로젝트의 `tools/host_rtt_adapter.py` 파일 참조)
@@ -614,18 +670,33 @@ void Process_Temperature_Loop(float current_temp) {
 }
 ```
 
-### 7.3 호스트 UI 출력 복원 결과 비교
-호스트 파서가 바이너리 패킷을 디코딩하여 복원하는 최종 텍스트:
+### 7.3 상수 문자열 (Flash/ROM Pointer) 로깅 및 호스트 무바이너리 복원
+```c
+static const char g_str_ready[] = "SYSTEM_READY";
+
+void Process_System_State(void) {
+    // Flash 상주 상수 문자열 포인터 주소(4B)만 초고속 전송 (Zero Copy, ~0.2us)
+    EVENT_LOG(EVT_SYS_STATE,
+        KV(state, "STANDBY"),            // const char* 리터럴 -> Flash 주소 전송
+        KV_FLASH_STR(desc, g_str_ready)  // 전역 정적 심볼 -> Flash 주소 전송
+    );
+}
+```
+
+### 7.4 호스트 UI 출력 복원 결과 비교
+호스트 파서는 바이너리 파일(.elf) 없이 **오직 `mapping.json` 단독 파일**만 참조하여 최종 텍스트로 합성합니다:
 
 ```text
 [CAN:RX] channel=1 std_id=0x07E8 data="11223344AABBCCDD" exec_cyc=184
 [TEMP:CTRL] temp=87.420 limit=85 msg="OVERHEAT"
+[SYS:STATE] state="STANDBY" desc="SYSTEM_READY"
 ```
 
 기존 호스트 UI 테스트 엔진은 수신된 텍스트를 파싱하여:
 - `[CAN:RX]`와 다음 이벤트 간 타임스탬프 시간차 검증
 - `exec_cyc` 값이 250 사이클 이하인지 임계값 판정
 - `temp` 값이 상한 `limit`을 초과했는지 범위 검증
+- `[SYS:STATE]`의 `state` 및 `desc`가 기대 문자열(`"STANDBY"`, `"SYSTEM_READY"`)과 일치하는지 정규식 및 문자열 검증
 등을 기존 정규식 스크립트 수정 없이 100% 동일하게 수행할 수 있습니다.
 
 ---
@@ -645,9 +716,10 @@ void Process_Temperature_Loop(float current_temp) {
 
 ## 9. 부록: 확장 및 신뢰성 고려사항
 
-1. **체크섬 (Checksum/CRC) 옵션**:
+1. **포스트 컴파일 상수 문자열 자동 주입의 장점**:
+   - 타깃 MCU는 `const char*`의 4바이트 Flash 메모리 주소만 전송하므로 전송 오버헤드가 단 6바이트(고정 슬롯 1개)에 불과합니다.
+   - 호스트 환경에서 무거운 ELF 파일이나 디버그 심볼, 바이너리 덤프를 직접 소지하고 파싱할 필요 없이 가벼운 `mapping.json` 단일 파일만 배포하면 되므로 CI/CD 배포 및 호스트 UI 운영 환경이 매우 단순해집니다.
+2. **체크섬 (Checksum/CRC) 옵션**:
    - 고주파 노이즈가 심한 SWD 환경을 위해 필요 시 패킷 말미에 1바이트 XOR 체크섬 또는 CRC-16 필드를 추가할 수 있도록 프레임 규격의 버전 플래그를 확장할 수 있습니다.
-2. **Flash 상주 문자열 (`TYPE_FLASH_STR`) 심볼 역참조**:
-   - 타깃은 `const char*`의 32비트 절대 메모리 주소만 전송하고, 호스트 디코더가 ELF 파일(`.rodata` 섹션)을 로드하여 해당 주소의 문자열을 복원하도록 파이프라인을 확장하면 버퍼 전송 대역폭을 0바이트로 극대화할 수 있습니다.
 3. **버퍼 오버플로우 검출**:
    - 패킷 헤더의 `sync` 필드 바이트를 확장하거나 시퀀스 번호(1바이트 Sequence Counter)를 헤더에 부여하여 호스트 레이어에서 패킷 드롭 여부를 실시간 카운팅할 수 있습니다.

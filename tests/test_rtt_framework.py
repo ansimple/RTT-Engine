@@ -3,6 +3,7 @@
 
 import os
 import sys
+import json
 import unittest
 import struct
 import tempfile
@@ -18,6 +19,13 @@ from gen_rtt_framework import (
     parse_firmware_sources,
     generate_header,
     generate_mapping_json,
+)
+from post_compile_strings import (
+    parse_elf_sections_and_symbols,
+    extract_rodata_strings,
+    resolve_symbols_to_strings,
+    match_candidate_strings,
+    update_mapping_with_strings,
 )
 from host_rtt_adapter import RttFrameDecoder
 
@@ -59,7 +67,7 @@ class TestScanner(unittest.TestCase):
                 }
                 """)
 
-            events, keys = parse_firmware_sources([temp_dir])
+            events, keys, candidates = parse_firmware_sources([temp_dir])
             self.assertIn("EVT_SYS_BOOT", events)
             self.assertIn("EVT_SENSOR_DATA", events)
             self.assertIn("boot_count", keys)
@@ -145,14 +153,100 @@ class TestHostDecoder(unittest.TestCase):
         self.assertIn("temp=42.500", text)
         self.assertIn("limit=100", text)
 
+    def test_decode_flash_str_with_mapping(self):
+        # Flash string address 0x08001000 -> "SYS_OK" in mapping.json
+        temp_dir = tempfile.mkdtemp()
+        try:
+            m_path = os.path.join(temp_dir, "m.json")
+            with open(m_path, "w", encoding="utf-8") as f:
+                json.dump({
+                    "events": { "0x0001": { "token": "EVT_TEST", "module": "TEST", "event": "RUN" } },
+                    "keys": { "0x001": { "name": "status" }, "0x002": { "name": "unmapped" } },
+                    "strings": { "0x08001000": "SYS_OK" }
+                }, f)
+
+            decoder = RttFrameDecoder(m_path)
+            # Item 0: key=0x001, TYPE_FLASH_STR=6, val=0x08001000
+            # Item 1: key=0x002, TYPE_FLASH_STR=6, val=0x08009999 (not mapped)
+            header = struct.pack('<BHIB', 0xA5, 0x0001, 5555, 2)
+            slot0 = struct.pack('<HI', (0x6 << 12) | 0x001, 0x08001000)
+            slot1 = struct.pack('<HI', (0x6 << 12) | 0x002, 0x08009999)
+            packet = header + slot0 + slot1
+
+            text, ts, consumed = decoder.decode_packet(packet)
+            self.assertEqual(consumed, len(packet))
+            self.assertEqual(ts, 5555)
+            self.assertIn('[TEST:RUN]', text)
+            self.assertIn('status="SYS_OK"', text)
+            self.assertIn('unmapped=0x08009999', text)
+        finally:
+            shutil.rmtree(temp_dir)
+
+    def test_post_compile_string_extraction(self):
+        # Unit test verifying post-compile string extractor logic on a dummy ELF or binary
+        temp_dir = tempfile.mkdtemp()
+        try:
+            c_code = """
+            #include <stdio.h>
+            const char g_boot_str[] = "SYSTEM_INITIALIZED";
+            const char g_ready_str[] = "DEVICE_ONLINE";
+            int main(void) {
+                printf("%s %s\\n", g_boot_str, g_ready_str);
+                return 0;
+            }
+            """
+            src_path = os.path.join(temp_dir, "test_app.c")
+            elf_path = os.path.join(temp_dir, "test_app.elf")
+            mapping_path = os.path.join(temp_dir, "mapping.json")
+
+            with open(src_path, "w", encoding="utf-8") as f:
+                f.write(c_code)
+
+            import subprocess
+            subprocess.check_call(["gcc", "-O2", "-no-pie", src_path, "-o", elf_path])
+
+            with open(mapping_path, "w", encoding="utf-8") as f:
+                json.dump({
+                    "events": {},
+                    "keys": {},
+                    "candidate_strings": ["SYSTEM_INITIALIZED", "DEVICE_ONLINE"]
+                }, f)
+
+            sections, symbols = parse_elf_sections_and_symbols(elf_path)
+            rodata_str = extract_rodata_strings(sections)
+            sym_str = resolve_symbols_to_strings(sections, symbols)
+            cand_str = match_candidate_strings(sections, ["SYSTEM_INITIALIZED", "DEVICE_ONLINE"])
+            all_str = {**rodata_str, **sym_str, **cand_str}
+
+            update_mapping_with_strings(mapping_path, all_str)
+
+            with open(mapping_path, "r", encoding="utf-8") as f:
+                updated_data = json.load(f)
+
+            self.assertIn("strings", updated_data)
+            str_values = list(updated_data["strings"].values())
+            self.assertIn("SYSTEM_INITIALIZED", str_values)
+            self.assertIn("DEVICE_ONLINE", str_values)
+        finally:
+            shutil.rmtree(temp_dir)
+
     def test_c_binary_dump_verification(self):
         # Build and execute C example to verify end-to-end binary stream
         import subprocess
         bin_path = os.path.join(PROJECT_ROOT, "build_test_example")
-        dump_path = os.path.join(PROJECT_ROOT, "test_output.bin")
+        test_mapping = os.path.join(PROJECT_ROOT, "test_mapping.json")
+        test_header = os.path.join(PROJECT_ROOT, "include", "generated_rtt_keys.h")
 
+        # 1. Run pre-build scanner
+        events, keys, candidates = parse_firmware_sources([
+            os.path.join(PROJECT_ROOT, "examples")
+        ])
+        generate_header(keys, test_header, events)
+        generate_mapping_json(events, keys, test_mapping, candidates)
+
+        # 2. Compile C binary
         compile_cmd = [
-            "gcc", "-std=c11", "-O2",
+            "gcc", "-std=c11", "-O2", "-no-pie",
             "-I" + os.path.join(PROJECT_ROOT, "include"),
             os.path.join(PROJECT_ROOT, "src", "SEGGER_RTT.c"),
             os.path.join(PROJECT_ROOT, "examples", "main_example.c"),
@@ -160,15 +254,26 @@ class TestHostDecoder(unittest.TestCase):
         ]
         try:
             subprocess.check_call(compile_cmd)
+
+            # 3. Run post-compile string extractor to populate test_mapping.json
+            sections, symbols = parse_elf_sections_and_symbols(bin_path)
+            rodata_strings = extract_rodata_strings(sections)
+            sym_strings = resolve_symbols_to_strings(sections, symbols)
+            cand_strings = match_candidate_strings(sections, list(candidates))
+            all_str = {**rodata_strings, **sym_strings, **cand_strings}
+            update_mapping_with_strings(test_mapping, all_str)
+
+            # 4. Execute C binary
             subprocess.check_call([bin_path])
 
             output_file = os.path.join(PROJECT_ROOT, "rtt_output.bin")
             with open(output_file, "rb") as f:
                 data = f.read()
 
-            decoder = RttFrameDecoder(self.mapping_file)
+            # 5. Host decoder operates SOLELY with test_mapping.json (no binary file passed)
+            decoder = RttFrameDecoder(test_mapping)
             events = decoder.feed(data)
-            self.assertEqual(len(events), 2)
+            self.assertEqual(len(events), 3)
 
             evt1_text, evt1_ts = events[0]
             self.assertIn("[CAN:RX]", evt1_text)
@@ -182,11 +287,18 @@ class TestHostDecoder(unittest.TestCase):
             self.assertIn("temp=87.420", evt2_text)
             self.assertIn("limit=85", evt2_text)
             self.assertIn('msg="OVERHEAT"', evt2_text)
+
+            evt3_text, evt3_ts = events[2]
+            self.assertIn("[SYS:STATE]", evt3_text)
+            self.assertIn('state="STANDBY"', evt3_text)
+            self.assertIn('desc="SYSTEM_READY"', evt3_text)
         finally:
             if os.path.exists(bin_path):
                 os.remove(bin_path)
             if os.path.exists(os.path.join(PROJECT_ROOT, "rtt_output.bin")):
                 os.remove(os.path.join(PROJECT_ROOT, "rtt_output.bin"))
+            if os.path.exists(test_mapping):
+                os.remove(test_mapping)
 
 
 if __name__ == "__main__":

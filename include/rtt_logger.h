@@ -179,6 +179,8 @@ static inline RttLogItem_t _rtt_slot_str(uint16_t k, const char *v)  { return _r
 #define KV_HEX16(k, v)     _rtt_make_hex16(KEY_ID_##k, (uint32_t)(v))
 #define KV_HEX32(k, v)     _rtt_make_hex32(KEY_ID_##k, (uint32_t)(v))
 #define KV_CYC(k, v)       _rtt_make_cyc(KEY_ID_##k, (uint32_t)(v))
+#define KV_STR(k, v)       _rtt_make_flash_str(KEY_ID_##k, (const char*)(v))
+#define KV_FLASH_STR(k, v) _rtt_make_flash_str(KEY_ID_##k, (const char*)(v))
 
 /* Variable Length Payloads (Hex Array, Dynamic String) */
 #define KV_HEX_ARR(k, len) _rtt_make_hex_arr(KEY_ID_##k, (uint16_t)(len))
