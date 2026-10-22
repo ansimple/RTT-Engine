@@ -1,0 +1,66 @@
+{
+  "events": {
+    "0x0001": {
+      "token": "EVT_CAN_RX",
+      "module": "CAN",
+      "event": "RX"
+    },
+    "0x0003": {
+      "token": "EVT_SYS_STATE",
+      "module": "SYS",
+      "event": "STATE"
+    },
+    "0x0002": {
+      "token": "EVT_TEMP_CTRL",
+      "module": "TEMP",
+      "event": "CTRL"
+    }
+  },
+  "keys": {
+    "0x001": {
+      "name": "channel",
+      "display_override": ""
+    },
+    "0x002": {
+      "name": "data",
+      "display_override": ""
+    },
+    "0x009": {
+      "name": "desc",
+      "display_override": ""
+    },
+    "0x003": {
+      "name": "exec_cyc",
+      "display_override": ""
+    },
+    "0x004": {
+      "name": "limit",
+      "display_override": ""
+    },
+    "0x005": {
+      "name": "msg",
+      "display_override": ""
+    },
+    "0x008": {
+      "name": "state",
+      "display_override": ""
+    },
+    "0x006": {
+      "name": "std_id",
+      "display_override": ""
+    },
+    "0x007": {
+      "name": "temp",
+      "display_override": ""
+    }
+  },
+  "strings": {
+    "0x00402007": "BSTANDBY",
+    "0x00402008": "STANDBY",
+    "0x00402010": "wb",
+    "0x00402013": "rtt_output.bin",
+    "0x00402078": "SYSTEM_READY",
+    "0x00404060": "GCC: (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0",
+    "0x00404080": "04.1) 13.3.0"
+  }
+}
