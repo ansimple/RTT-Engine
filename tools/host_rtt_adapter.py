@@ -66,7 +66,7 @@ class RttFrameDecoder:
             type_code = (tag >> 12) & 0x0F
             key_id = f"0x{(tag & 0x0FFF):03X}"
 
-            if type_code in (0x7, 0x8):  # TYPE_HEX_ARR or TYPE_DYN_STR
+            if type_code in (0x6, 0x7, 0x8):  # TYPE_STR, TYPE_HEX_ARR, or TYPE_DYN_STR
                 length = raw_val & 0xFFFF
                 trailing_data_len += length
                 slot_items.append((type_code, key_id, raw_val, length))
@@ -99,21 +99,14 @@ class RttFrameDecoder:
                 val_str = f"0x{(raw_val & 0xFFFF):04X}"
             elif type_code == 0x5:  # TYPE_HEX32
                 val_str = f"0x{raw_val:08X}"
-            elif type_code == 0x6:  # TYPE_FLASH_STR (Constant string resolved via mapping.json)
-                addr_key = f"0x{raw_val:08X}"
-                if addr_key in self.strings_map:
-                    val_str = f'"{self.strings_map[addr_key]}"'
-                else:
-                    # Fallback to hex address if string not mapped in mapping.json
-                    val_str = addr_key
-            elif type_code == 0x7:  # TYPE_HEX_ARR
-                arr_bytes = buffer[trailing_offset: trailing_offset + var_len]
-                trailing_offset += var_len
-                val_str = f'"{arr_bytes.hex().upper()}"'
-            elif type_code == 0x8:  # TYPE_DYN_STR
+            elif type_code in (0x6, 0x8):  # TYPE_STR or TYPE_DYN_STR (Trailing ASCII/UTF-8 String)
                 str_bytes = buffer[trailing_offset: trailing_offset + var_len]
                 trailing_offset += var_len
                 val_str = f'"{str_bytes.decode("utf-8", errors="replace")}"'
+            elif type_code == 0x7:  # TYPE_HEX_ARR (Trailing Raw Byte Array)
+                arr_bytes = buffer[trailing_offset: trailing_offset + var_len]
+                trailing_offset += var_len
+                val_str = f'"{arr_bytes.hex().upper()}"'
             elif type_code == 0x9:  # TYPE_CYC
                 val_str = str(raw_val)
             else:
